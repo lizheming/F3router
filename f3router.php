@@ -250,10 +250,7 @@ class Base extends Prefab {
 	**/
 	function exists($key,&$val=NULL) {
 		$val=$this->ref($key,FALSE);
-		return isset($val)?
-			TRUE:
-			(Cache::instance()->exists($this->hash($key).'.var',$val)?
-				$val:FALSE);
+		return isset($val);
 	}
 
 	/**
@@ -263,9 +260,7 @@ class Base extends Prefab {
 	**/
 	function devoid($key) {
 		$val=$this->ref($key,FALSE);
-		return empty($val) &&
-			(!Cache::instance()->exists($this->hash($key).'.var',$val) ||
-				!$val);
+		return empty($val);
 	}
 
 	/**
@@ -287,9 +282,6 @@ class Base extends Prefab {
 			}
 		}
 		else switch ($key) {
-			case 'CACHE':
-				$val=Cache::instance()->load($val,TRUE);
-				break;
 			case 'ENCODING':
 				$val=ini_set('default_charset',$val);
 				if (extension_loaded('mbstring'))
@@ -315,10 +307,6 @@ class Base extends Prefab {
 		if (preg_match('/^JAR\b/',$key))
 			call_user_func_array(
 				'session_set_cookie_params',$this->hive['JAR']);
-		$cache=Cache::instance();
-		if ($cache->exists($hash=$this->hash($key).'.var') || $ttl)
-			// Persist the key-value pair
-			$cache->set($hash,$val,$ttl);
 		return $ref;
 	}
 
@@ -334,12 +322,8 @@ class Base extends Prefab {
 				array($this,'format'),
 				array_merge(array($val),is_array($args)?$args:array($args))
 			);
-		if (is_null($val)) {
-			// Attempt to retrieve from cache
-			if (Cache::instance()->exists($this->hash($key).'.var',$data))
-				return $data;
-		}
-		return $val;
+		if (!is_null($val))
+			return $val;
 	}
 
 	/**
@@ -349,12 +333,8 @@ class Base extends Prefab {
 	**/
 	function clear($key) {
 		// Normalize array literal
-		$cache=Cache::instance();
 		$parts=$this->cut($key);
-		if ($key=='CACHE')
-			// Clear cache contents
-			$cache->reset();
-		elseif (preg_match('/^(GET|POST|COOKIE)\b(.+)/',$key,$expr)) {
+		if (preg_match('/^(GET|POST|COOKIE)\b(.+)/',$key,$expr)) {
 			$this->clear('REQUEST'.$expr[2]);
 			if ($expr[1]=='COOKIE') {
 				$parts=$this->cut($key);
@@ -385,9 +365,6 @@ class Base extends Prefab {
 				session_commit();
 				session_start();
 			}
-			if ($cache->exists($hash=$this->hash($key).'.var'))
-				// Remove from cache
-				$cache->clear($hash);
 		}
 	}
 
@@ -1264,24 +1241,8 @@ class Base extends Prefab {
 				// Process request
 				$body='';
 				$now=microtime(TRUE);
-				if (preg_match('/GET|HEAD/',$this->hive['VERB']) &&
-					isset($ttl)) {
-					// Only GET and HEAD requests are cacheable
-					$headers=$this->hive['HEADERS'];
-					$cache=Cache::instance();
-					$cached=$cache->exists(
-						$hash=$this->hash($this->hive['VERB'].' '.
-							$this->hive['URI']).'.url',$data);
-					if ($cached && $cached[0]+$ttl>$now) {
-						// Retrieve from cache backend
-						list($headers,$body)=$data;
-						if (PHP_SAPI!='cli')
-							array_walk($headers,'header');
-						$this->expire($cached[0]+$ttl-$now);
-					}
-					else
-						// Expire HTTP client-cached page
-						$this->expire($ttl);
+				if (isset($ttl)) {
+					$this->expire($ttl);
 				}
 				else
 					$this->expire(0);
@@ -1292,10 +1253,6 @@ class Base extends Prefab {
 					// Call route handler
 					$this->call($handler,array($this,$args),
 						'beforeroute,afterroute');
-					$body=ob_get_clean();
-					if ($ttl && !error_get_last())
-						// Save to cache backend
-						$cache->set($hash,array(headers_list(),$body),$ttl);
 				}
 				$this->hive['RESPONSE']=$body;
 				if (!$this->hive['QUIET']) {
@@ -1405,11 +1362,10 @@ class Base extends Prefab {
 		return array_shift($args);
 	}
 
-	/**
+	/*
 	*	Configure framework according to .ini-style file settings
 	*	@return NULL
 	*	@param $file string
-	**/
 	function config($file) {
 		preg_match_all(
 			'/(?<=^|\n)(?:'.
@@ -1452,6 +1408,8 @@ class Base extends Prefab {
 		}
 	}
 
+	**/
+
 	/**
 	*	Create mutex, invoke callback then drop ownership when done
 	*	@return mixed
@@ -1475,64 +1433,6 @@ class Base extends Prefab {
 		fclose($handle);
 		@unlink($lock);
 		return $out;
-	}
-
-	/**
-	*	Read file (with option to apply Unix LF as standard line ending)
-	*	@return string
-	*	@param $file string
-	*	@param $lf bool
-	**/
-	function read($file,$lf=FALSE) {
-		$out=file_get_contents($file);
-		return $lf?preg_replace('/\r\n|\r/',"\n",$out):$out;
-	}
-
-	/**
-	*	Exclusive file write
-	*	@return int|FALSE
-	*	@param $file string
-	*	@param $data mixed
-	*	@param $append bool
-	**/
-	function write($file,$data,$append=FALSE) {
-		return file_put_contents($file,$data,LOCK_EX|($append?FILE_APPEND:0));
-	}
-
-	/**
-	*	Apply syntax highlighting
-	*	@return string
-	*	@param $text string
-	**/
-	function highlight($text) {
-		$out='';
-		$pre=FALSE;
-		$text=trim($text);
-		if (!preg_match('/^<\?php/',$text)) {
-			$text='<?php '.$text;
-			$pre=TRUE;
-		}
-		foreach (token_get_all($text) as $token)
-			if ($pre)
-				$pre=FALSE;
-			else
-				$out.='<span'.
-					(is_array($token)?
-						(' class="'.
-							substr(strtolower(token_name($token[0])),2).'">'.
-							$this->encode($token[1]).''):
-						('>'.$this->encode($token))).
-					'</span>';
-		return $out?('<code>'.$out.'</code>'):$text;
-	}
-
-	/**
-	*	Dump expression with syntax highlighting
-	*	@return NULL
-	*	@param $expr mixed
-	**/
-	function dump($expr) {
-		echo $this->highlight($this->stringify($expr));
 	}
 
 	/**
@@ -1669,7 +1569,6 @@ class Base extends Prefab {
 			'BASE'=>$base,
 			'BITMASK'=>ENT_COMPAT,
 			'BODY'=>NULL,
-			'CACHE'=>FALSE,
 			'CASELESS'=>TRUE,
 			'DEBUG'=>0,
 			'DIACRITICS'=>array(),
@@ -1748,833 +1647,6 @@ class Base extends Prefab {
 		spl_autoload_register(array($this,'autoload'));
 		// Register shutdown handler
 		register_shutdown_function(array($this,'unload'),getcwd());
-	}
-
-}
-
-//! Cache engine
-class Cache extends Prefab {
-
-	protected
-		//! Cache DSN
-		$dsn,
-		//! Prefix for cache entries
-		$prefix,
-		//! MemCache or Redis object
-		$ref;
-
-	/**
-	*	Return timestamp and TTL of cache entry or FALSE if not found
-	*	@return array|FALSE
-	*	@param $key string
-	*	@param $val mixed
-	**/
-	function exists($key,&$val=NULL) {
-		$fw=Base::instance();
-		if (!$this->dsn)
-			return FALSE;
-		$ndx=$this->prefix.'.'.$key;
-		$parts=explode('=',$this->dsn,2);
-		switch ($parts[0]) {
-			case 'apc':
-			case 'apcu':
-				$raw=apc_fetch($ndx);
-				break;
-			case 'redis':
-				$raw=$this->ref->get($ndx);
-				break;
-			case 'memcache':
-				$raw=memcache_get($this->ref,$ndx);
-				break;
-			case 'wincache':
-				$raw=wincache_ucache_get($ndx);
-				break;
-			case 'xcache':
-				$raw=xcache_get($ndx);
-				break;
-			case 'folder':
-				if (is_file($file=$parts[1].$ndx))
-					$raw=$fw->read($file);
-				break;
-		}
-		if (!empty($raw)) {
-			list($val,$time,$ttl)=(array)$fw->unserialize($raw);
-			if ($ttl===0 || $time+$ttl>microtime(TRUE))
-				return array($time,$ttl);
-			$this->clear($key);
-		}
-		return FALSE;
-	}
-
-	/**
-	*	Store value in cache
-	*	@return mixed|FALSE
-	*	@param $key string
-	*	@param $val mixed
-	*	@param $ttl int
-	**/
-	function set($key,$val,$ttl=0) {
-		$fw=Base::instance();
-		if (!$this->dsn)
-			return TRUE;
-		$ndx=$this->prefix.'.'.$key;
-		$time=microtime(TRUE);
-		if ($cached=$this->exists($key))
-			list($time,$ttl)=$cached;
-		$data=$fw->serialize(array($val,$time,$ttl));
-		$parts=explode('=',$this->dsn,2);
-		switch ($parts[0]) {
-			case 'apc':
-			case 'apcu':
-				return apc_store($ndx,$data,$ttl);
-			case 'redis':
-				return $this->ref->set($ndx,$data,array('ex'=>$ttl));
-			case 'memcache':
-				return memcache_set($this->ref,$ndx,$data,0,$ttl);
-			case 'wincache':
-				return wincache_ucache_set($ndx,$data,$ttl);
-			case 'xcache':
-				return xcache_set($ndx,$data,$ttl);
-			case 'folder':
-				return $fw->write($parts[1].$ndx,$data);
-		}
-		return FALSE;
-	}
-
-	/**
-	*	Retrieve value of cache entry
-	*	@return mixed|FALSE
-	*	@param $key string
-	**/
-	function get($key) {
-		return $this->dsn && $this->exists($key,$data)?$data:FALSE;
-	}
-
-	/**
-	*	Delete cache entry
-	*	@return bool
-	*	@param $key string
-	**/
-	function clear($key) {
-		if (!$this->dsn)
-			return;
-		$ndx=$this->prefix.'.'.$key;
-		$parts=explode('=',$this->dsn,2);
-		switch ($parts[0]) {
-			case 'apc':
-			case 'apcu':
-				return apc_delete($ndx);
-			case 'redis':
-				return $this->ref->del($ndx);
-			case 'memcache':
-				return memcache_delete($this->ref,$ndx);
-			case 'wincache':
-				return wincache_ucache_delete($ndx);
-			case 'xcache':
-				return xcache_unset($ndx);
-			case 'folder':
-				return is_file($file=$parts[1].$ndx) && @unlink($file);
-		}
-		return FALSE;
-	}
-
-	/**
-	*	Clear contents of cache backend
-	*	@return bool
-	*	@param $suffix string
-	*	@param $lifetime int
-	**/
-	function reset($suffix=NULL,$lifetime=0) {
-		if (!$this->dsn)
-			return TRUE;
-		$regex='/'.preg_quote($this->prefix.'.','/').'.+?'.
-			preg_quote($suffix,'/').'/';
-		$parts=explode('=',$this->dsn,2);
-		switch ($parts[0]) {
-			case 'apc':
-				$key='info';
-			case 'apcu':
-				if (empty($key))
-					$key='key';
-				$info=apc_cache_info('user');
-				foreach ($info['cache_list'] as $item)
-					if (preg_match($regex,$item[$key]) &&
-						$item['mtime']+$lifetime<time())
-						apc_delete($item[$key]);
-				return TRUE;
-			case 'redis':
-				$fw=Base::instance();
-				$keys=$this->ref->keys($this->prefix.'.*'.$suffix);
-				foreach($keys as $key) {
-					$val=$fw->unserialize($this->ref->get($key));
-					if ($val[1]+$lifetime<time())
-						$this->ref->del($key);
-				}
-				return TRUE;
-			case 'memcache':
-				foreach (memcache_get_extended_stats(
-					$this->ref,'slabs') as $slabs)
-					foreach (array_filter(array_keys($slabs),'is_numeric')
-						as $id)
-						foreach (memcache_get_extended_stats(
-							$this->ref,'cachedump',$id) as $data)
-							if (is_array($data))
-								foreach ($data as $key=>$val)
-									if (preg_match($regex,$key) &&
-										$val[1]+$lifetime<time())
-										memcache_delete($this->ref,$key);
-				return TRUE;
-			case 'wincache':
-				$info=wincache_ucache_info();
-				foreach ($info['ucache_entries'] as $item)
-					if (preg_match($regex,$item['key_name']) &&
-						$item['use_time']+$lifetime<time())
-					wincache_ucache_delete($item['key_name']);
-				return TRUE;
-			case 'xcache':
-				return TRUE; /* Not supported */
-			case 'folder':
-				if ($glob=@glob($parts[1].'*'))
-					foreach ($glob as $file)
-						if (preg_match($regex,basename($file)) &&
-							filemtime($file)+$lifetime<time())
-							@unlink($file);
-				return TRUE;
-		}
-		return FALSE;
-	}
-
-	/**
-	*	Load/auto-detect cache backend
-	*	@return string
-	*	@param $dsn bool|string
-	**/
-	function load($dsn) {
-		$fw=Base::instance();
-		if ($dsn=trim($dsn)) {
-			if (preg_match('/^redis=(.+)/',$dsn,$parts) &&
-				extension_loaded('redis')) {
-				$port=6379;
-				$parts=explode(':',$parts[1],2);
-				if (count($parts)>1)
-					list($host,$port)=$parts;
-				else
-					$host=$parts[0];
-				$this->ref=new Redis;
-				if(!$this->ref->connect($host,$port,2))
-					$this->ref=NULL;
-			}
-			elseif (preg_match('/^memcache=(.+)/',$dsn,$parts) &&
-				extension_loaded('memcache'))
-				foreach ($fw->split($parts[1]) as $server) {
-					$port=11211;
-					$parts=explode(':',$server,2);
-					if (count($parts)>1)
-						list($host,$port)=$parts;
-					else
-						$host=$parts[0];
-					if (empty($this->ref))
-						$this->ref=@memcache_connect($host,$port)?:NULL;
-					else
-						memcache_add_server($this->ref,$host,$port);
-				}
-			if (empty($this->ref) && !preg_match('/^folder\h*=/',$dsn))
-				$dsn=($grep=preg_grep('/^(apc|wincache|xcache)/',
-					array_map('strtolower',get_loaded_extensions())))?
-						// Auto-detect
-						current($grep):
-						// Use filesystem as fallback
-						('folder='.$fw->get('TEMP').'cache/');
-			if (preg_match('/^folder\h*=\h*(.+)/',$dsn,$parts) &&
-				!is_dir($parts[1]))
-				mkdir($parts[1],Base::MODE,TRUE);
-		}
-		$this->prefix=$fw->hash($_SERVER['SERVER_NAME'].$fw->get('BASE'));
-		return $this->dsn=$dsn;
-	}
-
-	/**
-	*	Class constructor
-	*	@return object
-	*	@param $dsn bool|string
-	**/
-	function __construct($dsn=FALSE) {
-		if ($dsn)
-			$this->load($dsn);
-	}
-
-}
-
-//! View handler
-class View extends Prefab {
-
-	protected
-		//! Template file
-		$view;
-
-	/**
-	*	Encode characters to equivalent HTML entities
-	*	@return string
-	*	@param $arg mixed
-	**/
-	function esc($arg) {
-		$fw=Base::instance();
-		return $fw->recursive($arg,
-			function($val) use($fw) {
-				return is_string($val)?$fw->encode($val):$val;
-			}
-		);
-	}
-
-	/**
-	*	Decode HTML entities to equivalent characters
-	*	@return string
-	*	@param $arg mixed
-	**/
-	function raw($arg) {
-		$fw=Base::instance();
-		return $fw->recursive($arg,
-			function($val) use($fw) {
-				return is_string($val)?$fw->decode($val):$val;
-			}
-		);
-	}
-
-	/**
-	*	Create sandbox for template execution
-	*	@return string
-	*	@param $hive array
-	**/
-	protected function sandbox(array $hive=NULL) {
-		$fw=Base::instance();
-		if (!$hive)
-			$hive=$fw->hive();
-		if ($fw->get('ESCAPE'))
-			$hive=$this->esc($hive);
-		$hive['ALIASES']=$fw->build($hive['ALIASES']);
-		extract($hive);
-		unset($fw);
-		unset($hive);
-		ob_start();
-		require($this->view);
-		return ob_get_clean();
-	}
-
-	/**
-	*	Render template
-	*	@return string
-	*	@param $file string
-	*	@param $mime string
-	*	@param $hive array
-	*	@param $ttl int
-	**/
-	function render($file,$mime='text/html',array $hive=NULL,$ttl=0) {
-		$fw=Base::instance();
-		$cache=Cache::instance();
-		$cached=$cache->exists($hash=$fw->hash($file),$data);
-		if ($cached && $cached[0]+$ttl>microtime(TRUE))
-			return $data;
-		foreach ($fw->split($fw->get('UI').';./') as $dir)
-			if (is_file($this->view=$fw->fixslashes($dir.$file))) {
-				if (isset($_COOKIE[session_name()]))
-					@session_start();
-				$fw->sync('SESSION');
-				if (PHP_SAPI!='cli')
-					header('Content-Type: '.$mime.'; '.
-						'charset='.$fw->get('ENCODING'));
-				$data=$this->sandbox($hive);
-				if ($ttl)
-					$cache->set($hash,$data);
-				return $data;
-			}
-		user_error(sprintf(Base::E_Open,$file));
-	}
-
-}
-
-//! Lightweight template engine
-class Preview extends View {
-
-	protected
-		//! MIME type
-		$mime;
-
-	/**
-	*	Convert token to variable
-	*	@return string
-	*	@param $str string
-	**/
-	function token($str) {
-		return trim(preg_replace('/\{\{(.+?)\}\}/s',trim('\1'),
-			Base::instance()->compile($str)));
-	}
-
-	/**
-	*	Assemble markup
-	*	@return string
-	*	@param $node string
-	**/
-	protected function build($node) {
-		$self=$this;
-		return preg_replace_callback(
-			'/\{\{(.+?)\}\}/s',
-			function($expr) use($self) {
-				$str=trim($self->token($expr[1]));
-				if (preg_match('/^(.+?)\h*\|(\h*\w+(?:\h*[,;]\h*\w+)*)/',
-					$str,$parts)) {
-					$str=$parts[1];
-					foreach (Base::instance()->split($parts[2]) as $func)
-						$str=(($func=='format')?'\Base::instance()':'$this').
-							'->'.$func.'('.$str.')';
-				}
-				return '<?php echo '.$str.'; ?>';
-			},
-			preg_replace_callback(
-				'/\{~(.+?)~\}/s',
-				function($expr) use($self) {
-					return '<?php '.$self->token($expr[1]).' ?>';
-				},
-				$node
-			)
-		);
-	}
-
-	/**
-	*	Render template string
-	*	@return string
-	*	@param $str string
-	*	@param $hive array
-	**/
-	function resolve($str,array $hive=NULL) {
-		if (!$hive)
-			$hive=\Base::instance()->hive();
-		extract($hive);
-		ob_start();
-		eval(' ?>'.$this->build($str).'<?php ');
-		return ob_get_clean();
-	}
-
-	/**
-	*	Render template
-	*	@return string
-	*	@param $file string
-	*	@param $mime string
-	*	@param $hive array
-	*	@param $ttl int
-	**/
-	function render($file,$mime='text/html',array $hive=NULL,$ttl=0) {
-		$fw=Base::instance();
-		$cache=Cache::instance();
-		$cached=$cache->exists($hash=$fw->hash($file),$data);
-		if ($cached && $cached[0]+$ttl>microtime(TRUE))
-			return $data;
-		if (!is_dir($tmp=$fw->get('TEMP')))
-			mkdir($tmp,Base::MODE,TRUE);
-		foreach ($fw->split($fw->get('UI')) as $dir)
-			if (is_file($view=$fw->fixslashes($dir.$file))) {
-				if (!is_file($this->view=($tmp.
-					$fw->hash($fw->get('ROOT').$fw->get('BASE')).'.'.
-					$fw->hash($view).'.php')) ||
-					filemtime($this->view)<filemtime($view)) {
-					// Remove PHP code and comments
-					$text=preg_replace(
-						'/(?<!["\'])\h*<\?(?:php|\s*=).+?\?>\h*(?!["\'])|'.
-						'\{\*.+?\*\}/is','',
-						$fw->read($view));
-					if (method_exists($this,'parse'))
-						$text=$this->parse($text);
-					$fw->write($this->view,$this->build($text));
-				}
-				if (isset($_COOKIE[session_name()]))
-					@session_start();
-				$fw->sync('SESSION');
-				if (PHP_SAPI!='cli')
-					header('Content-Type: '.($this->mime=$mime).'; '.
-						'charset='.$fw->get('ENCODING'));
-				$data=$this->sandbox($hive);
-				if ($ttl)
-					$cache->set($hash,$data);
-				return $data;
-			}
-		user_error(sprintf(Base::E_Open,$file));
-	}
-
-}
-
-//! ISO language/country codes
-class ISO extends Prefab {
-
-	//@{ ISO 3166-1 country codes
-	const
-		CC_af='Afghanistan',
-		CC_ax='Åland Islands',
-		CC_al='Albania',
-		CC_dz='Algeria',
-		CC_as='American Samoa',
-		CC_ad='Andorra',
-		CC_ao='Angola',
-		CC_ai='Anguilla',
-		CC_aq='Antarctica',
-		CC_ag='Antigua and Barbuda',
-		CC_ar='Argentina',
-		CC_am='Armenia',
-		CC_aw='Aruba',
-		CC_au='Australia',
-		CC_at='Austria',
-		CC_az='Azerbaijan',
-		CC_bs='Bahamas',
-		CC_bh='Bahrain',
-		CC_bd='Bangladesh',
-		CC_bb='Barbados',
-		CC_by='Belarus',
-		CC_be='Belgium',
-		CC_bz='Belize',
-		CC_bj='Benin',
-		CC_bm='Bermuda',
-		CC_bt='Bhutan',
-		CC_bo='Bolivia',
-		CC_bq='Bonaire, Sint Eustatius and Saba',
-		CC_ba='Bosnia and Herzegovina',
-		CC_bw='Botswana',
-		CC_bv='Bouvet Island',
-		CC_br='Brazil',
-		CC_io='British Indian Ocean Territory',
-		CC_bn='Brunei Darussalam',
-		CC_bg='Bulgaria',
-		CC_bf='Burkina Faso',
-		CC_bi='Burundi',
-		CC_kh='Cambodia',
-		CC_cm='Cameroon',
-		CC_ca='Canada',
-		CC_cv='Cape Verde',
-		CC_ky='Cayman Islands',
-		CC_cf='Central African Republic',
-		CC_td='Chad',
-		CC_cl='Chile',
-		CC_cn='China',
-		CC_cx='Christmas Island',
-		CC_cc='Cocos (Keeling) Islands',
-		CC_co='Colombia',
-		CC_km='Comoros',
-		CC_cg='Congo',
-		CC_cd='Congo, The Democratic Republic of',
-		CC_ck='Cook Islands',
-		CC_cr='Costa Rica',
-		CC_ci='Côte d\'ivoire',
-		CC_hr='Croatia',
-		CC_cu='Cuba',
-		CC_cw='Curaçao',
-		CC_cy='Cyprus',
-		CC_cz='Czech Republic',
-		CC_dk='Denmark',
-		CC_dj='Djibouti',
-		CC_dm='Dominica',
-		CC_do='Dominican Republic',
-		CC_ec='Ecuador',
-		CC_eg='Egypt',
-		CC_sv='El Salvador',
-		CC_gq='Equatorial Guinea',
-		CC_er='Eritrea',
-		CC_ee='Estonia',
-		CC_et='Ethiopia',
-		CC_fk='Falkland Islands (Malvinas)',
-		CC_fo='Faroe Islands',
-		CC_fj='Fiji',
-		CC_fi='Finland',
-		CC_fr='France',
-		CC_gf='French Guiana',
-		CC_pf='French Polynesia',
-		CC_tf='French Southern Territories',
-		CC_ga='Gabon',
-		CC_gm='Gambia',
-		CC_ge='Georgia',
-		CC_de='Germany',
-		CC_gh='Ghana',
-		CC_gi='Gibraltar',
-		CC_gr='Greece',
-		CC_gl='Greenland',
-		CC_gd='Grenada',
-		CC_gp='Guadeloupe',
-		CC_gu='Guam',
-		CC_gt='Guatemala',
-		CC_gg='Guernsey',
-		CC_gn='Guinea',
-		CC_gw='Guinea-Bissau',
-		CC_gy='Guyana',
-		CC_ht='Haiti',
-		CC_hm='Heard Island and McDonald Islands',
-		CC_va='Holy See (Vatican City State)',
-		CC_hn='Honduras',
-		CC_hk='Hong Kong',
-		CC_hu='Hungary',
-		CC_is='Iceland',
-		CC_in='India',
-		CC_id='Indonesia',
-		CC_ir='Iran, Islamic Republic of',
-		CC_iq='Iraq',
-		CC_ie='Ireland',
-		CC_im='Isle of Man',
-		CC_il='Israel',
-		CC_it='Italy',
-		CC_jm='Jamaica',
-		CC_jp='Japan',
-		CC_je='Jersey',
-		CC_jo='Jordan',
-		CC_kz='Kazakhstan',
-		CC_ke='Kenya',
-		CC_ki='Kiribati',
-		CC_kp='Korea, Democratic People\'s Republic of',
-		CC_kr='Korea, Republic of',
-		CC_kw='Kuwait',
-		CC_kg='Kyrgyzstan',
-		CC_la='Lao People\'s Democratic Republic',
-		CC_lv='Latvia',
-		CC_lb='Lebanon',
-		CC_ls='Lesotho',
-		CC_lr='Liberia',
-		CC_ly='Libya',
-		CC_li='Liechtenstein',
-		CC_lt='Lithuania',
-		CC_lu='Luxembourg',
-		CC_mo='Macao',
-		CC_mk='Macedonia, The Former Yugoslav Republic of',
-		CC_mg='Madagascar',
-		CC_mw='Malawi',
-		CC_my='Malaysia',
-		CC_mv='Maldives',
-		CC_ml='Mali',
-		CC_mt='Malta',
-		CC_mh='Marshall Islands',
-		CC_mq='Martinique',
-		CC_mr='Mauritania',
-		CC_mu='Mauritius',
-		CC_yt='Mayotte',
-		CC_mx='Mexico',
-		CC_fm='Micronesia, Federated States of',
-		CC_md='Moldova, Republic of',
-		CC_mc='Monaco',
-		CC_mn='Mongolia',
-		CC_me='Montenegro',
-		CC_ms='Montserrat',
-		CC_ma='Morocco',
-		CC_mz='Mozambique',
-		CC_mm='Myanmar',
-		CC_na='Namibia',
-		CC_nr='Nauru',
-		CC_np='Nepal',
-		CC_nl='Netherlands',
-		CC_nc='New Caledonia',
-		CC_nz='New Zealand',
-		CC_ni='Nicaragua',
-		CC_ne='Niger',
-		CC_ng='Nigeria',
-		CC_nu='Niue',
-		CC_nf='Norfolk Island',
-		CC_mp='Northern Mariana Islands',
-		CC_no='Norway',
-		CC_om='Oman',
-		CC_pk='Pakistan',
-		CC_pw='Palau',
-		CC_ps='Palestinian Territory, Occupied',
-		CC_pa='Panama',
-		CC_pg='Papua New Guinea',
-		CC_py='Paraguay',
-		CC_pe='Peru',
-		CC_ph='Philippines',
-		CC_pn='Pitcairn',
-		CC_pl='Poland',
-		CC_pt='Portugal',
-		CC_pr='Puerto Rico',
-		CC_qa='Qatar',
-		CC_re='Réunion',
-		CC_ro='Romania',
-		CC_ru='Russian Federation',
-		CC_rw='Rwanda',
-		CC_bl='Saint Barthélemy',
-		CC_sh='Saint Helena, Ascension and Tristan da Cunha',
-		CC_kn='Saint Kitts and Nevis',
-		CC_lc='Saint Lucia',
-		CC_mf='Saint Martin (French Part)',
-		CC_pm='Saint Pierre and Miquelon',
-		CC_vc='Saint Vincent and The Grenadines',
-		CC_ws='Samoa',
-		CC_sm='San Marino',
-		CC_st='Sao Tome and Principe',
-		CC_sa='Saudi Arabia',
-		CC_sn='Senegal',
-		CC_rs='Serbia',
-		CC_sc='Seychelles',
-		CC_sl='Sierra Leone',
-		CC_sg='Singapore',
-		CC_sk='Slovakia',
-		CC_sx='Sint Maarten (Dutch Part)',
-		CC_si='Slovenia',
-		CC_sb='Solomon Islands',
-		CC_so='Somalia',
-		CC_za='South Africa',
-		CC_gs='South Georgia and The South Sandwich Islands',
-		CC_ss='South Sudan',
-		CC_es='Spain',
-		CC_lk='Sri Lanka',
-		CC_sd='Sudan',
-		CC_sr='Suriname',
-		CC_sj='Svalbard and Jan Mayen',
-		CC_sz='Swaziland',
-		CC_se='Sweden',
-		CC_ch='Switzerland',
-		CC_sy='Syrian Arab Republic',
-		CC_tw='Taiwan, Province of China',
-		CC_tj='Tajikistan',
-		CC_tz='Tanzania, United Republic of',
-		CC_th='Thailand',
-		CC_tl='Timor-Leste',
-		CC_tg='Togo',
-		CC_tk='Tokelau',
-		CC_to='Tonga',
-		CC_tt='Trinidad and Tobago',
-		CC_tn='Tunisia',
-		CC_tr='Turkey',
-		CC_tm='Turkmenistan',
-		CC_tc='Turks and Caicos Islands',
-		CC_tv='Tuvalu',
-		CC_ug='Uganda',
-		CC_ua='Ukraine',
-		CC_ae='United Arab Emirates',
-		CC_gb='United Kingdom',
-		CC_us='United States',
-		CC_um='United States Minor Outlying Islands',
-		CC_uy='Uruguay',
-		CC_uz='Uzbekistan',
-		CC_vu='Vanuatu',
-		CC_ve='Venezuela',
-		CC_vn='Viet Nam',
-		CC_vg='Virgin Islands, British',
-		CC_vi='Virgin Islands, U.S.',
-		CC_wf='Wallis and Futuna',
-		CC_eh='Western Sahara',
-		CC_ye='Yemen',
-		CC_zm='Zambia',
-		CC_zw='Zimbabwe';
-	//@}
-
-	//@{ ISO 639-1 language codes (Windows-compatibility subset)
-	const
-		LC_af='Afrikaans',
-		LC_am='Amharic',
-		LC_ar='Arabic',
-		LC_as='Assamese',
-		LC_ba='Bashkir',
-		LC_be='Belarusian',
-		LC_bg='Bulgarian',
-		LC_bn='Bengali',
-		LC_bo='Tibetan',
-		LC_br='Breton',
-		LC_ca='Catalan',
-		LC_co='Corsican',
-		LC_cs='Czech',
-		LC_cy='Welsh',
-		LC_da='Danish',
-		LC_de='German',
-		LC_dv='Divehi',
-		LC_el='Greek',
-		LC_en='English',
-		LC_es='Spanish',
-		LC_et='Estonian',
-		LC_eu='Basque',
-		LC_fa='Persian',
-		LC_fi='Finnish',
-		LC_fo='Faroese',
-		LC_fr='French',
-		LC_gd='Scottish Gaelic',
-		LC_gl='Galician',
-		LC_gu='Gujarati',
-		LC_he='Hebrew',
-		LC_hi='Hindi',
-		LC_hr='Croatian',
-		LC_hu='Hungarian',
-		LC_hy='Armenian',
-		LC_id='Indonesian',
-		LC_ig='Igbo',
-		LC_is='Icelandic',
-		LC_it='Italian',
-		LC_ja='Japanese',
-		LC_ka='Georgian',
-		LC_kk='Kazakh',
-		LC_km='Khmer',
-		LC_kn='Kannada',
-		LC_ko='Korean',
-		LC_lb='Luxembourgish',
-		LC_lo='Lao',
-		LC_lt='Lithuanian',
-		LC_lv='Latvian',
-		LC_mi='Maori',
-		LC_ml='Malayalam',
-		LC_mr='Marathi',
-		LC_ms='Malay',
-		LC_mt='Maltese',
-		LC_ne='Nepali',
-		LC_nl='Dutch',
-		LC_no='Norwegian',
-		LC_oc='Occitan',
-		LC_or='Oriya',
-		LC_pl='Polish',
-		LC_ps='Pashto',
-		LC_pt='Portuguese',
-		LC_qu='Quechua',
-		LC_ro='Romanian',
-		LC_ru='Russian',
-		LC_rw='Kinyarwanda',
-		LC_sa='Sanskrit',
-		LC_si='Sinhala',
-		LC_sk='Slovak',
-		LC_sl='Slovenian',
-		LC_sq='Albanian',
-		LC_sv='Swedish',
-		LC_ta='Tamil',
-		LC_te='Telugu',
-		LC_th='Thai',
-		LC_tk='Turkmen',
-		LC_tr='Turkish',
-		LC_tt='Tatar',
-		LC_uk='Ukrainian',
-		LC_ur='Urdu',
-		LC_vi='Vietnamese',
-		LC_wo='Wolof',
-		LC_yo='Yoruba',
-		LC_zh='Chinese';
-	//@}
-
-	/**
-	*	Convert class constants to array
-	*	@return array
-	*	@param $prefix string
-	**/
-	protected function constants($prefix) {
-		$ref=new ReflectionClass($this);
-		$out=array();
-		foreach (preg_grep('/^'.$prefix.'/',array_keys($ref->getconstants()))
-			as $val) {
-			$out[$key=substr($val,strlen($prefix))]=
-				constant('self::'.$prefix.$key);
-		}
-		unset($ref);
-		return $out;
-	}
-
-	/**
-	*	Return list of languages indexed by ISO 639-1 language code
-	*	@return array
-	**/
-	function languages() {
-		return $this->constants('LC_');
-	}
-
-	/**
-	*	Return list of countries indexed by ISO 3166-1 country code
-	*	@return array
-	**/
-	function countries() {
-		return $this->constants('CC_');
 	}
 
 }
